@@ -1,3 +1,7 @@
+pub enum Trap {
+    Exception(Exception),
+    Interrupt(Interrupt),
+}
 pub enum Exception {
     InstructionAddressMisaligned = 0,
     InstructionAccessFault = 1,
@@ -16,4 +20,16 @@ pub enum Exception {
     DoubleTrap = 16,
     SoftwareCheck = 18,
     HardwareError = 19,
+}
+pub enum Interrupt {
+    UserSoftwareInterrupt = 0,
+    SupervisorSoftwareInterrupt = 1,
+    MachineSoftwareInterrupt = 3,
+    UserTimerInterrupt = 4,
+    SupervisorTimerInterrupt = 5,
+    MachineTimerInterrupt = 7,
+    UserExternalInterrupt = 8,
+    SupervisorExternalInterrupt = 9,
+    MachineExternalInterrupt = 11,
+    CounterOverflowInterrupt = 12,
 }

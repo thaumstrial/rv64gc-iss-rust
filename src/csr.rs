@@ -1,4 +1,4 @@
-use crate::exception::Exception;
+use crate::exception::{Exception, Trap};
 
 pub const FFLAGS: u16 = 0x001;  // Floating-point accrued exceptions
 pub const FRM: u16 = 0x002;     // Floating-point dynamic rounding mode
@@ -46,6 +46,10 @@ pub const SATP: u16 = 0x180;
 
 pub const MSTATUS: u16 = 0x300;
 pub const MISA: u16 = 0x301;
+pub const MVENDORID: u16 = 0xf11; // 0, non-commercial-implementation
+pub const MARCHID: u16 = 0xf12; // 0, non-commercial-implementation
+pub const MIMPID: u16 = 0xf13; // 0, non-commercial-implementation
+pub const MHARTID: u16 = 0xf14; // 0, single-core implementation
 pub const MEDELEG: u16 = 0x302;
 pub const MIDELEG: u16 = 0x303;
 pub const MIE: u16 = 0x304;
@@ -59,34 +63,48 @@ pub const MIP: u16 = 0x344;
 
 pub const MCYCLE: u16 = 0xb00;
 pub const MINSTRET: u16 = 0xb02;
-pub const MHARTID: u16 = 0xf14;
 
 pub const CSR_COUNT: usize = 4096;
 
-fn check_permission(addr: u16, level: u8, write: bool) -> Result<(), Exception> {
+fn check_permission(addr: u16, level: u8, write: bool) -> Result<(), Trap> {
     let csr_priv = ((addr >> 8) & 0x3) as u8;
     if (addr >> 10) == 0b11 && write {
-        return Err(Exception::IllegalInstruction); // read-only CSR
+        return Err(Trap::Exception(Exception::IllegalInstruction)); // read-only CSR
     }
     // user: 0, supervisor: 1, machine: 3
     if level < csr_priv {
-        return Err(Exception::IllegalInstruction); // insufficient privilege
+        return Err(Trap::Exception(Exception::IllegalInstruction)); // insufficient privilege
     }
     Ok(())
 }
 
-pub struct CSRs(Box<[u64]>);
+pub struct CSRs(pub Box<[u64]>);
 impl CSRs {
     pub fn new() -> Self {
-        CSRs(vec![0; CSR_COUNT].into_boxed_slice())
+        let mut csr = CSRs(vec![0; CSR_COUNT].into_boxed_slice());
+        csr.0[MISA as usize] =
+            // Extensions
+            // IMAFDC
+            // user mode, supervisor mode
+            1 << ('I' as u8 - 'A' as u8)
+            | 1 << ('M' as u8 - 'A' as u8)
+            | 1 << ('A' as u8 - 'A' as u8)
+            | 1 << ('F' as u8 - 'A' as u8)
+            | 1 << ('D' as u8 - 'A' as u8)
+            | 1 << ('S' as u8 - 'A' as u8)
+            | 1 << ('U' as u8 - 'A' as u8)
+            // MXL
+            // 64
+            | (2 << 62);
+        csr
     }
 
-    pub fn read(&self, addr: u16, level: u8) -> Result<u64, Exception> {
+    pub fn read(&self, addr: u16, level: u8) -> Result<u64, Trap> {
         check_permission(addr, level, false)?;
         let val = match addr {
             FFLAGS | FRM | FCSR => {
                 if ((self.0[MSTATUS as usize] >> 13) & 0b11) == 0 {
-                    return Err(Exception::IllegalInstruction); // FS = Off
+                    return Err(Trap::Exception(Exception::IllegalInstruction)); // FS = Off
                 }
                 match addr {
                     FFLAGS => self.0[FFLAGS as usize],
@@ -119,10 +137,13 @@ impl CSRs {
 
         Ok(val)
     }
-    pub fn write(&mut self, addr: u16, value: u64, level: u8) -> Result<(), Exception> {
+    pub fn write(&mut self, addr: u16, value: u64, level: u8) -> Result<(), Trap> {
         check_permission(addr, level, true)?;
 
         match addr {
+            MISA => {
+                // read-only
+            },
             MSTATUS => {
                 let old = self.0[MSTATUS as usize];
                 let changed = old ^ value;
@@ -133,7 +154,7 @@ impl CSRs {
 
                 let fs = (value >> 13) & 0b11;
                 if fs > 0b11 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
 
                 self.0[MSTATUS as usize] = (old & !MSTATUS_WRITE_MASK) | (value & MSTATUS_WRITE_MASK);
@@ -153,7 +174,25 @@ impl CSRs {
                 self.0[MIE as usize] = (self.0[MIE as usize] & !mask) | (value & mask);
             }
             MEPC => self.0[MEPC as usize] = value & !0b1,
-            MTVEC => self.0[MTVEC as usize] = value & !0b11,
+            MTVEC => {
+                // BASE field aligned on a 4-byte boundary
+                let changed = (value >> 4) << 4
+                    // 0, Direct
+                    // 1, Vectored
+                    // >=2, Reserved
+                    | (value & 0b11);
+                self.0[MTVEC as usize] = changed;
+            },
+            MIDELEG => {
+                // medeleg[11] is read-only zero.
+                // medeleg[16] is read-only
+                self.0[MIDELEG as usize] = value & !(1 << 11 | 1 << 16);
+            },
+            MIP => {
+                // SEIP, STIP, and SSIP are writable
+                let mask = (1 << 9) | (1 << 5) | (1 << 1);
+                self.0[MIP as usize] = (self.0[MIP as usize] & !mask) | (value & mask);
+            }
             _ => self.0[addr as usize] = value,
         }
 

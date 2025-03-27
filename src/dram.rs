@@ -1,5 +1,5 @@
 use crate::bus::DRAM_BASE;
-use crate::exception::Exception;
+use crate::exception::{Exception, Trap};
 use crate::cpu::{BYTE, HALF_WORD, WORD, DOUBLE_WORD};
 
 pub const DRAM_SIZE: u64 = 1024 * 1024 * 128; // 128MiB
@@ -11,23 +11,23 @@ impl DRAM {
         DRAM(data.into_boxed_slice())
     }
 
-    pub fn read(&self, addr: u64, size: u8) -> Result<u64, Exception> {
+    pub fn read(&self, addr: u64, size: u8) -> Result<u64, Trap> {
         match size {
             BYTE => Ok(self.read8(addr)),
             HALF_WORD => Ok(self.read16(addr)),
             WORD => Ok(self.read32(addr)),
             DOUBLE_WORD => Ok(self.read64(addr)),
-            _ => Err(Exception::LoadAccessFault),
+            _ => Err(Trap::Exception(Exception::LoadAccessFault)),
         }
     }
 
-    pub fn write(&mut self, addr: u64, value: u64, size: u8) -> Result<(), Exception> {
+    pub fn write(&mut self, addr: u64, value: u64, size: u8) -> Result<(), Trap> {
         match size {
             BYTE => Ok(self.write8(addr, value)),
             HALF_WORD => Ok(self.write16(addr, value)),
             WORD => Ok(self.write32(addr, value)),
             DOUBLE_WORD => Ok(self.write64(addr, value)),
-            _ => Err(Exception::StoreAMOAccessFault),
+            _ => Err(Trap::Exception(Exception::StoreAMOAccessFault)),
         }
     }
 

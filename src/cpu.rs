@@ -1,12 +1,15 @@
 use crate::bus::{Bus, DRAM_BASE};
-use crate::csr::CSRs;
-use crate::exception::Exception;
+use crate::csr::{CSRs, MCAUSE, MEPC, MTVAL, MTVEC};
+use crate::exception::{Exception, Trap};
 
 pub const REGS_COUNT: usize = 32;
 pub const BYTE: u8 = 8;
 pub const HALF_WORD: u8 = 16;
 pub const WORD: u8 = 32;
 pub const DOUBLE_WORD: u8 = 64;
+pub const PRIV_U: u8 = 0;
+pub const PRIV_S: u8 = 1;
+pub const PRIV_M: u8 = 3;
 pub fn sign_extend(val: u64, bits: u8) -> u64 {
     let shift = 64 - bits;
     ((val << shift) as i64 >> shift) as u64
@@ -162,40 +165,37 @@ impl CPU {
             bus: Bus::new(data),
             pc: DRAM_BASE,
             csr: CSRs::new(),
-            level: 0b11,
+            level: PRIV_M,
+        }
+    }
+
+    pub fn handle_trap(&self, trap: Trap) {
+        if self.level <= PRIV_S {
+
+        } else {
+            let cause = match trap {
+                Trap::Exception(e) => {
+                    0 << 63 | (e as u64)
+                }
+                Trap::Interrupt(i) => {
+                    1 << 63 | (i as u64)
+                }
+            };
+            self.csr.0[MCAUSE] = cause;
+            self.csr.0[MEPC] = self.pc;
+            self.csr.0[MTVAL] = 0;
         }
     }
 
     pub fn run(&mut self) {
         loop {
             if let Err(e) = self.step() {
-                match e {
-                    Exception::Breakpoint => {
-                        println!("Breakpoint");
-                        break;
-                    },
-                    Exception::EnvironmentCallFromUMode => {
-                        println!("EnvironmentCallFromUMode");
-                        break;
-                    },
-                    Exception::EnvironmentCallFromSMode => {
-                        println!("EnvironmentCallFromSMode");
-                        break;
-                    },
-                    Exception::EnvironmentCallFromMMode => {
-                        println!("EnvironmentCallFromMMode");
-                        break;
-                    },
-                    _ => {
-                        println!("Error");
-                        break;
-                    }
-                }
+                self.handle_trap(e);
             }
         }
     }
 
-    pub fn step(&mut self) -> Result<(), Exception> {
+    pub fn step(&mut self) -> Result<(), Trap> {
         // fetch
         let inst16 = self.bus.read(self.pc, HALF_WORD)? as u16;
         if inst16 & 0b11 == 0b11 {
@@ -219,7 +219,7 @@ impl CPU {
         self.pc = self.pc.wrapping_add(offset);
     }
 
-    pub fn execute32(&mut self, inst: u32) -> Result<(), Exception> {
+    pub fn execute32(&mut self, inst: u32) -> Result<(), Trap> {
         let opcode = inst & 0x7f;
         match opcode {
             0x37 => { // LUI
@@ -240,7 +240,7 @@ impl CPU {
             0x67 => { // JALR
                 let (rd, rs1, funct3, imm) = decode_i(inst);
                 if funct3 != 0 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
                 let target = self.x_regs.read(rs1)
                     .wrapping_add(sign_extend(imm as u64, 12)) & !1;
@@ -295,7 +295,7 @@ impl CPU {
                     0b001 => self.bus.write(addr, val, HALF_WORD)?, // SH
                     0b010 => self.bus.write(addr, val, WORD)?, // SW
                     0b011 => self.bus.write(addr, val, DOUBLE_WORD)?, // SD (RV64I)
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 }
                 self.next_inst32();
             },
@@ -314,7 +314,7 @@ impl CPU {
                         let shamt = (imm_raw & 0x3f) as u8;
                         let funct7 = (inst >> 25) & 0x7f;
                         if funct7 != 0b0000000 {
-                            return Err(Exception::IllegalInstruction);
+                            return Err(Trap::Exception(Exception::IllegalInstruction));
                         }
                         rs1_val << shamt
                     }
@@ -324,10 +324,10 @@ impl CPU {
                         match funct7 {
                             0b0000000 => rs1_val >> shamt,                    // SRLI
                             0b0100000 => ((rs1_val as i64) >> shamt) as u64, // SRAI
-                            _ => return Err(Exception::IllegalInstruction),
+                            _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                         }
                     },
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 };
 
                 self.x_regs.write(rd, result);
@@ -348,7 +348,7 @@ impl CPU {
                     (0b101, 0b0100000) => ((val1 as i64) >> (val2 & 0x3f)) as u64,// SRA
                     (0b110, 0b0000000) => val1 | val2,                            // OR
                     (0b111, 0b0000000) => val1 & val2,                            // AND
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 };
                 self.x_regs.write(rd, result);
                 self.next_inst32();
@@ -359,7 +359,7 @@ impl CPU {
                 match funct3 {
                     0b000 => self.next_inst32(),  // FENCE
                     0b001 => self.next_inst32(),  // FENCE.I (RV32/RV64 Fiencei)
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 }
             },
             0x73 => { // SYSTEM
@@ -370,27 +370,27 @@ impl CPU {
                 match funct3 {
                     0b000 => {
                         if !(rd != 0 && rs1 == 0) {
-                            return Err(Exception::IllegalInstruction);
+                            return Err(Trap::Exception(Exception::IllegalInstruction));
                         }
                         return match imm {
                             0x000 => { // ECALL
                                 match self.level {
                                     0b00 => {
-                                        Err(Exception::EnvironmentCallFromUMode)
+                                        Err(Trap::Exception(Exception::EnvironmentCallFromUMode))
                                     },
                                     0b01 => {
-                                        Err(Exception::EnvironmentCallFromSMode)
+                                        Err(Trap::Exception(Exception::EnvironmentCallFromSMode))
                                     },
                                     0b11 => {
-                                        Err(Exception::EnvironmentCallFromMMode)
+                                        Err(Trap::Exception(Exception::EnvironmentCallFromMMode))
                                     },
                                     _ => { unreachable!() },
                                 }
                             },
                             0x001 => { // EBREAK
-                                Err(Exception::Breakpoint)
+                                Err(Trap::Exception(Exception::Breakpoint))
                             },
-                            _ => Err(Exception::IllegalInstruction),
+                            _ => Err(Trap::Exception(Exception::IllegalInstruction)),
                         }
                     },
                     // Zicsr Standard Extension
@@ -443,7 +443,7 @@ impl CPU {
                         self.x_regs.write(rd, old);
                         self.next_inst32();
                     },
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 }
             },
             0x1b => { // I-Type W instructions (RV64I)
@@ -459,7 +459,7 @@ impl CPU {
                         let shamt = (imm_raw & 0x1f) as u8;
                         let funct7 = (inst >> 25) & 0x7f;
                         if funct7 != 0b0000000 {
-                            return Err(Exception::IllegalInstruction);
+                            return Err(Trap::Exception(Exception::IllegalInstruction));
                         }
                         ((rs1_val as u32) << shamt) as i32 as i64 as u64
                     }
@@ -469,10 +469,10 @@ impl CPU {
                         match funct7 {
                             0b0000000 => ((rs1_val as u32) >> shamt) as u64,                   // SRLIW
                             0b0100000 => ((rs1_val as i32) >> shamt) as i64 as u64,           // SRAIW
-                            _ => return Err(Exception::IllegalInstruction),
+                            _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                         }
                     }
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 };
                 self.x_regs.write(rd, result);
                 self.next_inst32();
@@ -487,7 +487,7 @@ impl CPU {
                     (0b001, 0b0000000) => (val1 << (val2 & 0x1f)) as i32 as i64 as u64,   // SLLW
                     (0b101, 0b0000000) => (val1 >> (val2 & 0x1f)) as i32 as i64 as u64,  // SRLW
                     (0b101, 0b0100000) => ((val1 as i32) >> (val2 & 0x1f)) as i64 as u64, // SRAW
-                    _ => return Err(Exception::IllegalInstruction),
+                    _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                 };
                 self.x_regs.write(rd, result);
                 self.next_inst32();
@@ -498,9 +498,9 @@ impl CPU {
         Ok(())
     }
 
-    pub fn execute16(&mut self, inst: u16) -> Result<(), Exception> {
+    pub fn execute16(&mut self, inst: u16) -> Result<(), Trap> {
         if inst == 0 {
-            return Err(Exception::IllegalInstruction);
+            return Err(Trap::Exception(Exception::IllegalInstruction));
         }
 
         let opcode = inst & 0b11;
@@ -509,7 +509,7 @@ impl CPU {
             (0b00, 0b000) => { // C.ADDI4SPN
                 let (rd_c, raw_imm) = decode_ciw(inst);
                 if raw_imm == 0 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
                 let offset = (
                     (raw_imm & 0x1) << 3
@@ -585,7 +585,7 @@ impl CPU {
             (0b01, 0b001) => { // C.ADDIW
                 let (rd, raw_imm) = decode_ci(inst);
                 if rd == 0 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
 
                 let nzimm = sign_extend(raw_imm as u64, 6);
@@ -612,7 +612,7 @@ impl CPU {
                         | ((raw_imm >> 6) & 0x1) << 9
                     ) as u64, 10);
                     if nzimm == 0 {
-                        return Err(Exception::IllegalInstruction);
+                        return Err(Trap::Exception(Exception::IllegalInstruction));
                     }
                     let val = self.x_regs.read(2).wrapping_add(nzimm);
                     self.x_regs.write(2, val);
@@ -674,7 +674,7 @@ impl CPU {
                                 let v2 = val2 as u32;
                                 v1.wrapping_add(v2) as i32 as i64 as u64
                             }
-                            _ => return Err(Exception::IllegalInstruction),
+                            _ => return Err(Trap::Exception(Exception::IllegalInstruction)),
                         };
 
                         self.x_regs.write(rd_c, result);
@@ -738,7 +738,7 @@ impl CPU {
             (0b10, 0b010) => { // C.LWSP
                 let (rd, raw_imm) = decode_ci(inst);
                 if rd == 0 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
                 let offset = sign_extend(
                     (
@@ -756,7 +756,7 @@ impl CPU {
             (0b10, 0b011) => { // C.LDSP
                 let (rd, raw_imm) = decode_ci(inst);
                 if rd == 0 {
-                    return Err(Exception::IllegalInstruction);
+                    return Err(Trap::Exception(Exception::IllegalInstruction));
                 }
                 let offset = sign_extend(
                     (
@@ -778,13 +778,13 @@ impl CPU {
                         match rs1  {
                             0 => { // C.JR
                                 if rs1 == 0 {
-                                    return Err(Exception::IllegalInstruction);
+                                    return Err(Trap::Exception(Exception::IllegalInstruction));
                                 }
                                 self.jump_inst(self.x_regs.read(rs1));
                             },
                             _ => { // C.MV
                                 if rs2 == 0 {
-                                    return Err(Exception::IllegalInstruction);
+                                    return Err(Trap::Exception(Exception::IllegalInstruction));
                                 }
                                 if rs1 != 0 {
                                     self.x_regs.write(rs1, self.x_regs.read(rs2));
@@ -796,9 +796,9 @@ impl CPU {
                     1 => {
                         if rs1 == 0 { // C.EBREAK
                             if rs2 != 0 {
-                                return Err(Exception::IllegalInstruction);
+                                return Err(Trap::Exception(Exception::IllegalInstruction));
                             }
-                            return Err(Exception::Breakpoint);
+                            return Err(Trap::Exception(Exception::Breakpoint));
                         } else {
                             if rs2 == 0 { // C.JALR
                                 let offset = self.x_regs.read(rs1);

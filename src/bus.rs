@@ -1,6 +1,6 @@
 use crate::dram::DRAM_SIZE;
 use crate::dram::DRAM;
-use crate::exception::Exception;
+use crate::exception::{Exception, Trap};
 
 pub const DRAM_BASE: u64 = 0x8000_0000;
 const DRAM_END: u64 = DRAM_BASE + DRAM_SIZE;
@@ -14,17 +14,17 @@ impl Bus {
         }
     }
 
-    pub fn read(&self, addr: u64, size: u8) -> Result<u64, Exception> {
+    pub fn read(&self, addr: u64, size: u8) -> Result<u64, Trap> {
         match addr {
             DRAM_BASE..= DRAM_END => self.dram.read(addr, size),
-            _ => Err(Exception::LoadAccessFault),
+            _ => Err(Trap::Exception(Exception::LoadAccessFault)),
         }
     }
 
-    pub fn write(&mut self, addr: u64, value: u64, size: u8) -> Result<(), Exception> {
+    pub fn write(&mut self, addr: u64, value: u64, size: u8) -> Result<(), Trap> {
         match addr {
             DRAM_BASE..=DRAM_END => self.dram.write(addr, value, size),
-            _ => Err(Exception::StoreAMOAccessFault),
+            _ => Err(Trap::Exception(Exception::StoreAMOAccessFault)),
         }
     }
 }
