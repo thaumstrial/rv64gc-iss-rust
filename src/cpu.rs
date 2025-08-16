@@ -169,7 +169,7 @@ impl CPU {
         }
     }
 
-    pub fn handle_trap(&self, trap: Trap) {
+    pub fn handle_trap(&mut self, trap: Trap) {
         if self.level <= PRIV_S {
 
         } else {
@@ -181,9 +181,9 @@ impl CPU {
                     1 << 63 | (i as u64)
                 }
             };
-            self.csr.0[MCAUSE] = cause;
-            self.csr.0[MEPC] = self.pc;
-            self.csr.0[MTVAL] = 0;
+            self.csr.0[MCAUSE as usize] = cause;
+            self.csr.0[MEPC as usize] = self.pc;
+            self.csr.0[MTVAL as usize] = 0;
         }
     }
 
